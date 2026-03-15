@@ -1,0 +1,35 @@
+From 3c85bff78f529afab3d58bacd0d7cccfb1a7f867 Mon Sep 17 00:00:00 2001
+From: headheadhead-csie <b08902062@csie.ntu.edu.tw>
+Date: Sun, 15 Mar 2026 12:06:40 +0800
+Subject: [PATCH] start-up-opt
+
+---
+ kernel/dma/swiotlb.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/dma/swiotlb.c b/kernel/dma/swiotlb.c
+index fb8ea4200332..a52d7ebd2663 100644
+--- a/kernel/dma/swiotlb.c
++++ b/kernel/dma/swiotlb.c
+@@ -327,10 +327,12 @@ static void __init *swiotlb_memblock_alloc(unsigned long nslabs,
+ 	 * allow to pick a location everywhere for hypervisors with guest
+ 	 * memory encryption.
+ 	 */
+-	if (flags & SWIOTLB_ANY)
+-		tlb = memblock_alloc(bytes, PAGE_SIZE);
+-	else
+-		tlb = memblock_alloc_low(bytes, PAGE_SIZE);
++	tlb = memblock_alloc_try_nid(bytes, PAGE_SIZE, 0x30000000,
++				     0x50000000, NUMA_NO_NODE);
++	// if (flags & SWIOTLB_ANY)
++	// 	tlb = memblock_alloc(bytes, PAGE_SIZE);
++	// else
++	// 	tlb = memblock_alloc_low(bytes, PAGE_SIZE);
+ 
+ 	if (!tlb) {
+ 		pr_warn("%s: Failed to allocate %zu bytes tlb structure\n",
+
+base-commit: 2d9f5548feabdc280d0cf46f595f4144be3fe5a7
+-- 
+2.34.1
+

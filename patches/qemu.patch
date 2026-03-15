@@ -1,0 +1,52 @@
+From 6f3d7460941373823689fe1712bc0371d80671af Mon Sep 17 00:00:00 2001
+From: headheadhead-csie <b08902062@csie.ntu.edu.tw>
+Date: Sun, 15 Mar 2026 12:01:04 +0800
+Subject: [PATCH] start-up-opt
+
+---
+ hw/vfio/common.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/hw/vfio/common.c b/hw/vfio/common.c
+index 36d0cf6585..d6eeb65d32 100644
+--- a/hw/vfio/common.c
++++ b/hw/vfio/common.c
+@@ -574,6 +574,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
+     void *vaddr;
+     int ret;
+     Error *err = NULL;
++    const hwaddr swiotlb_start = 0x0000000030000000, swiotlb_end = 0x0000000050000000;
+ 
+     if (!vfio_listener_valid_section(section, "region_add")) {
+         return;
+@@ -649,6 +650,11 @@ static void vfio_listener_region_add(MemoryListener *listener,
+         return;
+     }
+ 
++    if (iova <= swiotlb_start && swiotlb_end <= int128_get64(llend)) {
++        iova = swiotlb_start;
++        llend = int128_make64(swiotlb_end);
++    }
++
+     vaddr = memory_region_get_ram_ptr(section->mr) +
+             section->offset_within_region +
+             (iova - section->offset_within_address_space);
+@@ -670,8 +676,13 @@ static void vfio_listener_region_add(MemoryListener *listener,
+         }
+     }
+ 
++    if (iova > swiotlb_start || swiotlb_end > int128_get64(llend))
++        return;
++
++    printf("vfio-dma-start\n");
+     ret = vfio_container_dma_map(bcontainer, iova, int128_get64(llsize),
+                                  vaddr, section->readonly);
++    printf("vfio-dma-end\n");
+     if (ret) {
+         error_setg(&err, "vfio_container_dma_map(%p, 0x%"HWADDR_PRIx", "
+                    "0x%"HWADDR_PRIx", %p) = %d (%s)",
+
+base-commit: 24503e2fb30209a4f0646f01d8877832843bb241
+-- 
+2.34.1
+

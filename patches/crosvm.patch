@@ -1,0 +1,694 @@
+From d781706c18cfbcbcd56409ebf845590415c6c2ce Mon Sep 17 00:00:00 2001
+From: headheadhead <b08902062@csie.ntu.edu.tw>
+Date: Sun, 15 Mar 2026 11:44:28 +0800
+Subject: [PATCH] add ITS support and start-up optimization
+
+To allow the passthrough NIC initialize and work successfully in the
+guest, ITS support must be enabled.
+
+Start-up time optimization is implemented through the modification to
+`devices/src/vfio.rs`.
+---
+ aarch64/src/fdt.rs                      | 19 +++++++++-
+ aarch64/src/lib.rs                      | 18 +++++-----
+ devices/src/irqchip/kvm/aarch64.rs      | 47 ++++++++++++++++++++++++-
+ devices/src/pci/msi.rs                  |  5 +++
+ devices/src/pci/msix.rs                 | 27 +++++++++++---
+ devices/src/pci/pcie/pci_bridge.rs      |  1 +
+ devices/src/pci/vfio_pci.rs             |  8 +++--
+ devices/src/vfio.rs                     | 24 ++++++++-----
+ devices/src/virtio/interrupt.rs         |  4 +++
+ devices/src/virtio/virtio_pci_device.rs |  8 +++++
+ hypervisor/src/kvm/aarch64.rs           |  5 +++
+ hypervisor/src/kvm/mod.rs               |  8 +++--
+ hypervisor/src/lib.rs                   |  4 ++-
+ hypervisor/tests/kvm/aarch64.rs         |  2 ++
+ src/crosvm/sys/linux.rs                 |  4 ++-
+ vm_control/src/lib.rs                   |  3 ++
+ 16 files changed, 157 insertions(+), 30 deletions(-)
+
+diff --git a/aarch64/src/fdt.rs b/aarch64/src/fdt.rs
+index 51886b219..d720f7c72 100644
+--- a/aarch64/src/fdt.rs
++++ b/aarch64/src/fdt.rs
+@@ -35,6 +35,8 @@ use crate::AARCH64_GIC_CPUI_BASE;
+ use crate::AARCH64_GIC_CPUI_SIZE;
+ use crate::AARCH64_GIC_DIST_BASE;
+ use crate::AARCH64_GIC_DIST_SIZE;
++use crate::AARCH64_GIC_ITS_BASE;
++use crate::AARCH64_GIC_ITS_SIZE;
+ use crate::AARCH64_GIC_REDIST_SIZE;
+ use crate::AARCH64_PMU_IRQ;
+ use crate::AARCH64_PROTECTED_VM_FW_START;
+@@ -53,6 +55,7 @@ use crate::AARCH64_VMWDT_IRQ;
+ // these.
+ const PHANDLE_GIC: u32 = 1;
+ const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
++const PHANDLE_MSI: u32 = 0x8003;
+ 
+ // CPUs are assigned phandles starting with this number.
+ const PHANDLE_CPU0: u32 = 0x100;
+@@ -127,6 +130,7 @@ fn create_resv_memory_node(
+     restricted_dma_pool_node.set_prop("phandle", PHANDLE_RESTRICTED_DMA_POOL)?;
+     restricted_dma_pool_node.set_prop("compatible", "restricted-dma-pool")?;
+     restricted_dma_pool_node.set_prop("alignment", base::pagesize() as u64)?;
++    println!("{:?}", restricted_dma_pool_node);
+     Ok(PHANDLE_RESTRICTED_DMA_POOL)
+ }
+ 
+@@ -199,7 +203,7 @@ fn create_gic_node(fdt: &mut Fdt, is_gicv3: bool, num_cpus: u64) -> Result<()> {
+     let intc_node = fdt.root_mut().subnode_mut("intc")?;
+     if is_gicv3 {
+         intc_node.set_prop("compatible", "arm,gic-v3")?;
+-        gic_reg_prop[2] = AARCH64_GIC_DIST_BASE - (AARCH64_GIC_REDIST_SIZE * num_cpus);
++        gic_reg_prop[2] = AARCH64_GIC_ITS_BASE - (AARCH64_GIC_REDIST_SIZE * num_cpus);
+         gic_reg_prop[3] = AARCH64_GIC_REDIST_SIZE * num_cpus;
+     } else {
+         intc_node.set_prop("compatible", "arm,cortex-a15-gic")?;
+@@ -208,11 +212,22 @@ fn create_gic_node(fdt: &mut Fdt, is_gicv3: bool, num_cpus: u64) -> Result<()> {
+     }
+     intc_node.set_prop("#interrupt-cells", GIC_FDT_IRQ_NUM_CELLS)?;
+     intc_node.set_prop("interrupt-controller", ())?;
++    intc_node.set_prop("ranges", ())?;
+     intc_node.set_prop("reg", &gic_reg_prop)?;
+     intc_node.set_prop("phandle", PHANDLE_GIC)?;
+     intc_node.set_prop("#address-cells", 2u32)?;
+     intc_node.set_prop("#size-cells", 2u32)?;
++
++    let its_reg_prop = [AARCH64_GIC_ITS_BASE, AARCH64_GIC_ITS_SIZE];
++
++    let its_node = intc_node.subnode_mut("its")?;
++    its_node.set_prop("compatible", "arm,gic-v3-its")?;
++    its_node.set_prop("msi-controller", ())?;
++    its_node.set_prop("reg", &its_reg_prop)?;
++    its_node.set_prop("phandle", PHANDLE_MSI)?;
++
+     add_symbols_entry(fdt, "intc", "/intc")?;
++    add_symbols_entry(fdt, "its", "/intc/its")?;
+     Ok(())
+ }
+ 
+@@ -523,6 +538,8 @@ fn create_pci_nodes(
+     pci_node.set_prop("interrupt-map", interrupts)?;
+     pci_node.set_prop("interrupt-map-mask", masks)?;
+     pci_node.set_prop("dma-coherent", ())?;
++    pci_node.set_prop("msi-parent", PHANDLE_MSI)?;
++    pci_node.set_prop("linux,pci-domain", 0 as u32)?;
+     if let Some(dma_pool_phandle) = dma_pool_phandle {
+         pci_node.set_prop("memory-region", dma_pool_phandle)?;
+     }
+diff --git a/aarch64/src/lib.rs b/aarch64/src/lib.rs
+index e6e2d7a3b..459366a66 100644
+--- a/aarch64/src/lib.rs
++++ b/aarch64/src/lib.rs
+@@ -97,6 +97,9 @@ const AARCH64_CMDLINE_MAX_SIZE: usize = 2048;
+ // These constants indicate the address space used by the ARM vGIC.
+ const AARCH64_GIC_DIST_SIZE: u64 = 0x10000;
+ const AARCH64_GIC_CPUI_SIZE: u64 = 0x20000;
++const AARCH64_GIC_ITS_CONTROL_SIZE: u64 = 0x10000;
++const AARCH64_GIC_ITS_TRANS_SIZE: u64 = 0x10000;
++const AARCH64_GIC_ITS_SIZE: u64 = AARCH64_GIC_ITS_CONTROL_SIZE + AARCH64_GIC_ITS_TRANS_SIZE;
+ 
+ // This indicates the start of DRAM inside the physical address space.
+ const AARCH64_PHYS_MEM_START: u64 = 0x80000000;
+@@ -115,6 +118,7 @@ const AARCH64_PVTIME_SIZE: u64 = 64;
+ // address space.
+ const AARCH64_GIC_DIST_BASE: u64 = AARCH64_AXI_BASE - AARCH64_GIC_DIST_SIZE;
+ const AARCH64_GIC_CPUI_BASE: u64 = AARCH64_GIC_DIST_BASE - AARCH64_GIC_CPUI_SIZE;
++const AARCH64_GIC_ITS_BASE: u64 = AARCH64_GIC_CPUI_BASE - AARCH64_GIC_ITS_SIZE;
+ const AARCH64_GIC_REDIST_SIZE: u64 = 0x20000;
+ 
+ // PSR (Processor State Register) bits
+@@ -161,13 +165,9 @@ fn get_swiotlb_addr(
+     swiotlb_size: u64,
+     hypervisor: &(impl Hypervisor + ?Sized),
+ ) -> Option<GuestAddress> {
+-    if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+-        Some(GuestAddress(
+-            AARCH64_PHYS_MEM_START + memory_size - swiotlb_size,
+-        ))
+-    } else {
+-        None
+-    }
++    Some(GuestAddress(
++        AARCH64_PHYS_MEM_START + memory_size - swiotlb_size,
++    ))
+ }
+ 
+ // This was the speed kvmtool used, not sure if it matters.
+@@ -376,9 +376,7 @@ impl arch::LinuxArch for AArch64 {
+         // enabled, make the RAM memory region smaller to leave room for it.
+         let mut main_memory_size = components.memory_size;
+         if let Some(size) = components.swiotlb {
+-            if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+-                main_memory_size -= size;
+-            }
++            main_memory_size -= size;
+         }
+ 
+         let mut memory_regions = vec![(
+diff --git a/devices/src/irqchip/kvm/aarch64.rs b/devices/src/irqchip/kvm/aarch64.rs
+index 46ff79109..3c61647ad 100644
+--- a/devices/src/irqchip/kvm/aarch64.rs
++++ b/devices/src/irqchip/kvm/aarch64.rs
+@@ -45,11 +45,13 @@ pub struct KvmKernelIrqChip {
+ // These constants indicate the address space used by the ARM vGIC.
+ const AARCH64_GIC_DIST_SIZE: u64 = 0x10000;
+ const AARCH64_GIC_CPUI_SIZE: u64 = 0x20000;
++const AARCH64_GIC_ITS_SIZE: u64 = 0x20000;
+ 
+ // These constants indicate the placement of the GIC registers in the physical
+ // address space.
+ const AARCH64_GIC_DIST_BASE: u64 = AARCH64_AXI_BASE - AARCH64_GIC_DIST_SIZE;
+ const AARCH64_GIC_CPUI_BASE: u64 = AARCH64_GIC_DIST_BASE - AARCH64_GIC_CPUI_SIZE;
++const AARCH64_GIC_ITS_BASE: u64 = AARCH64_GIC_CPUI_BASE - AARCH64_GIC_ITS_SIZE;
+ const AARCH64_GIC_REDIST_SIZE: u64 = 0x20000;
+ 
+ // This is the minimum number of SPI interrupts aligned to 32 + 32 for the
+@@ -65,10 +67,12 @@ impl KvmKernelIrqChip {
+     pub fn new(vm: KvmVm, num_vcpus: usize) -> Result<KvmKernelIrqChip> {
+         let cpu_if_addr: u64 = AARCH64_GIC_CPUI_BASE;
+         let dist_if_addr: u64 = AARCH64_GIC_DIST_BASE;
+-        let redist_addr: u64 = dist_if_addr - (AARCH64_GIC_REDIST_SIZE * num_vcpus as u64);
++        let redist_addr: u64 = AARCH64_GIC_ITS_BASE - (AARCH64_GIC_REDIST_SIZE * num_vcpus as u64);
++        let its_addr: u64 = AARCH64_GIC_ITS_BASE;
+         let raw_cpu_if_addr = &cpu_if_addr as *const u64;
+         let raw_dist_if_addr = &dist_if_addr as *const u64;
+         let raw_redist_addr = &redist_addr as *const u64;
++        let raw_its_addr = &its_addr as *const u64;
+ 
+         let cpu_if_attr = kvm_device_attr {
+             group: KVM_DEV_ARM_VGIC_GRP_ADDR,
+@@ -136,6 +140,47 @@ impl KvmKernelIrqChip {
+             return errno_result();
+         }
+ 
++        let its = vm.create_device(DeviceKind::ArmVgicITS)?;
++
++        let its_attr = kvm_device_attr {
++            group: KVM_DEV_ARM_VGIC_GRP_CTRL,
++            attr: KVM_DEV_ARM_VGIC_CTRL_INIT as u64,
++            addr: 0 as u64,
++            flags: 0,
++        };
++        // SAFETY:
++        // Safe because we allocated the struct that's being passed in
++        let ret = unsafe { ioctl_with_ref(&its, KVM_SET_DEVICE_ATTR, &its_attr) };
++        if ret != 0 {
++            return errno_result();
++        }
++
++        let its_attr = kvm_device_attr {
++            group: KVM_DEV_ARM_VGIC_GRP_ADDR,
++            attr: KVM_VGIC_ITS_ADDR_TYPE as u64,
++            addr: raw_its_addr as u64,
++            flags: 0,
++        };
++        // SAFETY:
++        // Safe because we allocated the struct that's being passed in
++        let ret = unsafe { ioctl_with_ref(&its, KVM_SET_DEVICE_ATTR, &its_attr) };
++        if ret != 0 {
++            return errno_result();
++        }
++
++        let reset_attr = kvm_device_attr {
++            group: KVM_DEV_ARM_VGIC_GRP_CTRL,
++            attr: KVM_DEV_ARM_ITS_CTRL_RESET as u64,
++            addr: 0,
++            flags: 0,
++        };
++        // SAFETY:
++        // Safe because we allocated the struct that's being passed in
++        let ret = unsafe { ioctl_with_ref(&its, KVM_SET_DEVICE_ATTR, &reset_attr) };
++        if ret != 0 {
++            return errno_result();
++        }
++
+         Ok(KvmKernelIrqChip {
+             vm,
+             vcpus: Arc::new(Mutex::new((0..num_vcpus).map(|_| None).collect())),
+diff --git a/devices/src/pci/msi.rs b/devices/src/pci/msi.rs
+index 64497ef60..834a65936 100644
+--- a/devices/src/pci/msi.rs
++++ b/devices/src/pci/msi.rs
+@@ -20,6 +20,7 @@ use crate::pci::pci_configuration::PciCapConfig;
+ use crate::pci::pci_configuration::PciCapConfigWriteResult;
+ use crate::pci::PciCapability;
+ use crate::pci::PciCapabilityID;
++use crate::pci::PciAddress;
+ 
+ // MSI registers
+ pub const PCI_MSI_NEXT_POINTER: u32 = 0x1; // Next cap pointer
+@@ -55,6 +56,7 @@ pub struct MsiConfig {
+     irqfd: Option<Event>,
+     gsi: Option<u32>,
+     device_id: u32,
++    pci_addr: Option<PciAddress>,
+     device_name: String,
+ }
+ 
+@@ -64,6 +66,7 @@ impl MsiConfig {
+         mask_cap: bool,
+         vm_socket_irq: Tube,
+         device_id: u32,
++        pci_addr: Option<PciAddress>,
+         device_name: String,
+     ) -> Self {
+         let mut ctrl: u16 = 0;
+@@ -83,6 +86,7 @@ impl MsiConfig {
+             irqfd: None,
+             gsi: None,
+             device_id,
++            pci_addr,
+             device_name,
+         }
+     }
+@@ -181,6 +185,7 @@ impl MsiConfig {
+             gsi,
+             msi_address: self.address,
+             msi_data: self.data.into(),
++            pci_addr: self.pci_addr.expect("The device should have pci addr").to_u32(),
+         }) {
+             error!("failed to send AddMsiRoute request at {:?}", e);
+             return;
+diff --git a/devices/src/pci/msix.rs b/devices/src/pci/msix.rs
+index db3ecf887..970d2d3d3 100644
+--- a/devices/src/pci/msix.rs
++++ b/devices/src/pci/msix.rs
+@@ -29,6 +29,8 @@ use crate::pci::pci_configuration::PciCapConfigWriteResult;
+ use crate::pci::PciCapability;
+ use crate::pci::PciCapabilityID;
+ 
++use super::PciAddress;
++
+ const MAX_MSIX_VECTORS_PER_DEVICE: u16 = 2048;
+ pub const MSIX_TABLE_ENTRIES_MODULO: u64 = 16;
+ pub const MSIX_PBA_ENTRIES_MODULO: u64 = 8;
+@@ -66,6 +68,7 @@ pub struct MsixConfig {
+     msi_device_socket: Tube,
+     msix_num: u16,
+     pci_id: u32,
++    pci_addr: Option<PciAddress>,
+     device_name: String,
+ }
+ 
+@@ -121,7 +124,7 @@ pub enum MsixStatus {
+ impl PciCapConfigWriteResult for MsixStatus {}
+ 
+ impl MsixConfig {
+-    pub fn new(msix_vectors: u16, vm_socket: Tube, pci_id: u32, device_name: String) -> Self {
++    pub fn new(msix_vectors: u16, vm_socket: Tube, pci_id: u32, pci_addr: Option<PciAddress>, device_name: String) -> Self {
+         assert!(msix_vectors <= MAX_MSIX_VECTORS_PER_DEVICE);
+ 
+         let mut table_entries: Vec<MsixTableEntry> = Vec::new();
+@@ -146,6 +149,7 @@ impl MsixConfig {
+             msi_device_socket: vm_socket,
+             msix_num: msix_vectors,
+             pci_id,
++            pci_addr,
+             device_name,
+         }
+     }
+@@ -181,6 +185,12 @@ impl MsixConfig {
+         self.enabled
+     }
+ 
++    /// The assignment of pci_addr is after device creation.
++    /// Call this function to update correct pci_addr.
++    pub fn update_pci_address(&mut self, pci_addr: Option<PciAddress>) {
++        self.pci_addr = pci_addr;
++    }
++
+     /// Read the MSI-X Capability Structure.
+     /// The top 2 bits in Message Control word are emulated and all other
+     /// bits are read only.
+@@ -361,11 +371,13 @@ impl MsixConfig {
+             return Ok(());
+         }
+ 
++        let pci_addr: u32 = self.pci_addr.expect("The config should have pci address").to_u32();
+         self.msi_device_socket
+             .send(&VmIrqRequest::AddMsiRoute {
+                 gsi,
+                 msi_address,
+                 msi_data,
++                pci_addr,
+             })
+             .map_err(MsixError::AddMsiRouteSend)?;
+         if let VmIrqResponse::Err(e) = self
+@@ -852,6 +864,7 @@ mod tests {
+                 gsi,
+                 msi_address,
+                 msi_data,
++                ..
+             } => MsiRouteDetails {
+                 gsi,
+                 msi_address,
+@@ -881,7 +894,9 @@ mod tests {
+         let (irqchip_tube, msix_config_tube) = Tube::pair().unwrap();
+         let (_unused, unused_config_tube) = Tube::pair().unwrap();
+ 
+-        let mut cfg = MsixConfig::new(2, unused_config_tube, 0, "test_device".to_owned());
++        let mut cfg = MsixConfig::new(2, unused_config_tube, 0, Some(PciAddress {
++            bus: 0, dev: 0, func: 0,
++        }), "test_device".to_owned());
+ 
+         // Set up two MSI-X vectors (0 and 1).
+         // Data is 0xdVEC_NUM. Address is 0xaVEC_NUM.
+@@ -928,7 +943,9 @@ mod tests {
+             irqchip_tube
+         });
+ 
+-        let mut restored_cfg = MsixConfig::new(10, msix_config_tube, 10, "some_device".to_owned());
++        let mut restored_cfg = MsixConfig::new(10, msix_config_tube, 10, Some(PciAddress {
++            bus: 0, dev: 0, func: 0
++        }), "some_device".to_owned());
+         restored_cfg.restore(snapshot).unwrap();
+         irqchip_fake.join().unwrap();
+ 
+@@ -942,7 +959,9 @@ mod tests {
+     fn verify_msix_restore_warm_smoke() {
+         let (irqchip_tube, msix_config_tube) = Tube::pair().unwrap();
+ 
+-        let mut cfg = MsixConfig::new(2, msix_config_tube, 0, "test_device".to_owned());
++        let mut cfg = MsixConfig::new(2, msix_config_tube, 0, Some(PciAddress {
++            bus: 0, dev: 0, func: 0,
++        }), "test_device".to_owned());
+ 
+         // Set up two MSI-X vectors (0 and 1).
+         // Data is 0xdVEC_NUM. Address is 0xaVEC_NUM.
+diff --git a/devices/src/pci/pcie/pci_bridge.rs b/devices/src/pci/pcie/pci_bridge.rs
+index a9124fe68..2bb9996ce 100644
+--- a/devices/src/pci/pcie/pci_bridge.rs
++++ b/devices/src/pci/pcie/pci_bridge.rs
+@@ -82,6 +82,7 @@ impl PciBridge {
+             false,
+             msi_device_tube,
+             (PCI_VENDOR_ID_INTEL as u32) | (device_id as u32) << 16,
++            device.lock().preferred_address(),
+             device.lock().debug_label(),
+         )));
+ 
+diff --git a/devices/src/pci/vfio_pci.rs b/devices/src/pci/vfio_pci.rs
+index 132286dd3..9909f2943 100644
+--- a/devices/src/pci/vfio_pci.rs
++++ b/devices/src/pci/vfio_pci.rs
+@@ -173,6 +173,7 @@ impl VfioMsiCap {
+         msi_cap_start: u32,
+         vm_socket_irq: Tube,
+         device_id: u32,
++        pci_address: Option<PciAddress>,
+         device_name: String,
+     ) -> Self {
+         let msi_ctl: u16 = config.read_config(msi_cap_start + PCI_MSI_FLAGS);
+@@ -180,7 +181,7 @@ impl VfioMsiCap {
+         let mask_cap = (msi_ctl & PCI_MSI_FLAGS_MASKBIT) != 0;
+ 
+         VfioMsiCap {
+-            config: MsiConfig::new(is_64bit, mask_cap, vm_socket_irq, device_id, device_name),
++            config: MsiConfig::new(is_64bit, mask_cap, vm_socket_irq, device_id, pci_address, device_name),
+             offset: msi_cap_start,
+         }
+     }
+@@ -236,6 +237,7 @@ impl VfioMsixCap {
+         msix_cap_start: u32,
+         vm_socket_irq: Tube,
+         pci_id: u32,
++        pci_address: PciAddress,
+         device_name: String,
+     ) -> Self {
+         let msix_ctl: u16 = config.read_config(msix_cap_start + PCI_MSIX_FLAGS);
+@@ -263,7 +265,7 @@ impl VfioMsixCap {
+             msix_interrupt_evt.push(Event::new().expect("failed to create msix interrupt"));
+         }
+         VfioMsixCap {
+-            config: MsixConfig::new(table_size as u16, vm_socket_irq, pci_id, device_name),
++            config: MsixConfig::new(table_size as u16, vm_socket_irq, pci_id, Some(pci_address), device_name),
+             offset: msix_cap_start,
+             table_size: table_size as u16,
+             table_pci_bar,
+@@ -751,6 +753,7 @@ impl VfioPciDevice {
+                         cap_next,
+                         msi_socket,
+                         pci_id.into(),
++                        Some(preferred_address),
+                         dev.device_name().to_string(),
+                     ));
+                 }
+@@ -761,6 +764,7 @@ impl VfioPciDevice {
+                         cap_next,
+                         msix_socket,
+                         pci_id.into(),
++                        preferred_address,
+                         dev.device_name().to_string(),
+                     ))));
+                 }
+diff --git a/devices/src/vfio.rs b/devices/src/vfio.rs
+index e09ae8fdb..6f4dad746 100644
+--- a/devices/src/vfio.rs
++++ b/devices/src/vfio.rs
+@@ -48,6 +48,7 @@ use thiserror::Error;
+ use vfio_sys::vfio::vfio_acpi_dsm;
+ use vfio_sys::vfio::VFIO_IRQ_SET_DATA_BOOL;
+ use vfio_sys::*;
++use vm_memory::MemoryRegionPurpose;
+ use zerocopy::AsBytes;
+ use zerocopy::FromBytes;
+ 
+@@ -623,14 +624,21 @@ impl VfioContainer {
+                     for region in vm.get_memory().regions() {
+                         // SAFETY:
+                         // Safe because the guest regions are guaranteed not to overlap
+-                        unsafe {
+-                            self.vfio_dma_map(
+-                                region.guest_addr.0,
+-                                region.size as u64,
+-                                region.host_addr as u64,
+-                                true,
+-                            )
+-                        }?;
++                        println!("{:x}, {:x}, {:x}", region.guest_addr.0,
++                                                     region.size as u64,
++                                                     region.host_addr as u64);
++                        if region.options.purpose == MemoryRegionPurpose::StaticSwiotlbRegion {
++                            println!("vfio-dma-start");
++                            unsafe {
++                                self.vfio_dma_map(
++                                    region.guest_addr.0,
++                                    region.size as u64,
++                                    region.host_addr as u64,
++                                    true,
++                                )
++                            }?;
++                            println!("vfio-dma-end");
++                        }
+                     }
+                 }
+             }
+diff --git a/devices/src/virtio/interrupt.rs b/devices/src/virtio/interrupt.rs
+index c0197a2c1..6b132e393 100644
+--- a/devices/src/virtio/interrupt.rs
++++ b/devices/src/virtio/interrupt.rs
+@@ -28,6 +28,7 @@ use crate::acpi::PmWakeupEvent;
+ use crate::irq_event::IrqEdgeEvent;
+ use crate::irq_event::IrqLevelEvent;
+ use crate::pci::MsixConfig;
++use crate::pci::PciAddress;
+ 
+ struct TransportPci {
+     irq_evt_lvl: IrqLevelEvent,
+@@ -284,6 +285,9 @@ impl Interrupt {
+             msix_vectors,
+             unused_config_tube,
+             0,
++            Some(PciAddress {
++                bus: 0, dev: 0, func: 0,
++            }),
+             "test_device".to_owned(),
+         );
+ 
+diff --git a/devices/src/virtio/virtio_pci_device.rs b/devices/src/virtio/virtio_pci_device.rs
+index 585fef6ec..54f6aa807 100644
+--- a/devices/src/virtio/virtio_pci_device.rs
++++ b/devices/src/virtio/virtio_pci_device.rs
+@@ -470,6 +470,7 @@ impl VirtioPciDevice {
+             msix_num,
+             msi_device_tube,
+             PciId::new(VIRTIO_PCI_VENDOR_ID, pci_device_id).into(),
++            device.pci_address(),
+             device.debug_label(),
+         )));
+ 
+@@ -694,6 +695,10 @@ impl VirtioPciDevice {
+         self.pci_address
+     }
+ 
++    fn update_msix_pci_addr(&self, pci_addr: PciAddress) {
++        self.msix_config.lock().update_pci_address(Some(pci_addr));
++    }
++
+     #[cfg(target_arch = "x86_64")]
+     fn handle_pm_status_change(&mut self, status: &PmStatusChange) {
+         if let Some(interrupt) = self.interrupt.as_mut() {
+@@ -744,6 +749,9 @@ impl PciDevice for VirtioPciDevice {
+                 }
+             }
+         }
++        if let Some(pci_address) = self.pci_address {
++            self.update_msix_pci_addr(pci_address);
++        }
+         self.pci_address.ok_or(PciDeviceError::PciAllocationFailed)
+     }
+ 
+diff --git a/hypervisor/src/kvm/aarch64.rs b/hypervisor/src/kvm/aarch64.rs
+index 3c06085f9..a1903b74d 100644
+--- a/hypervisor/src/kvm/aarch64.rs
++++ b/hypervisor/src/kvm/aarch64.rs
+@@ -130,6 +130,11 @@ impl KvmVm {
+                 fd: 0,
+                 flags: 0,
+             }),
++            DeviceKind::ArmVgicITS => Some(kvm_create_device {
++                type_: kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_ITS,
++                fd: 0,
++                flags: 0,
++            }),
+             _ => None,
+         }
+     }
+diff --git a/hypervisor/src/kvm/mod.rs b/hypervisor/src/kvm/mod.rs
+index be9d7aabf..c37087d96 100644
+--- a/hypervisor/src/kvm/mod.rs
++++ b/hypervisor/src/kvm/mod.rs
+@@ -255,6 +255,7 @@ impl KvmVm {
+         for region in guest_mem.regions() {
+             // SAFETY:
+             // Safe because the guest regions are guaranteed not to overlap.
++            println!("region start: {}, end: {}, type: {:?}", region.guest_addr, region.size, region.options);
+             unsafe {
+                 set_user_memory_region(
+                     &vm_descriptor,
+@@ -1220,15 +1221,18 @@ impl From<&IrqRoute> for kvm_irq_routing_entry {
+                 },
+                 ..Default::default()
+             },
+-            IrqSource::Msi { address, data } => kvm_irq_routing_entry {
++            IrqSource::Msi { address, data, pci_addr } => kvm_irq_routing_entry {
+                 gsi: item.gsi,
+                 type_: KVM_IRQ_ROUTING_MSI,
++                flags: KVM_MSI_VALID_DEVID,
+                 u: kvm_irq_routing_entry__bindgen_ty_1 {
+                     msi: kvm_irq_routing_msi {
+                         address_lo: *address as u32,
+                         address_hi: (*address >> 32) as u32,
+                         data: *data,
+-                        ..Default::default()
++                        __bindgen_anon_1: kvm_irq_routing_msi__bindgen_ty_1 {
++                            devid: *pci_addr,
++                        }
+                     },
+                 },
+                 ..Default::default()
+diff --git a/hypervisor/src/lib.rs b/hypervisor/src/lib.rs
+index 0fe061a20..070980021 100644
+--- a/hypervisor/src/lib.rs
++++ b/hypervisor/src/lib.rs
+@@ -490,6 +490,8 @@ pub enum DeviceKind {
+     /// ARM virtual general interrupt controller v3
+     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+     ArmVgicV3,
++    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
++    ArmVgicITS,
+     /// RiscV AIA in-kernel emulation
+     #[cfg(target_arch = "riscv64")]
+     RiscvAia,
+@@ -511,7 +513,7 @@ pub enum IrqSourceChip {
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum IrqSource {
+     Irqchip { chip: IrqSourceChip, pin: u32 },
+-    Msi { address: u64, data: u32 },
++    Msi { address: u64, data: u32, pci_addr: u32 },
+ }
+ 
+ /// A single route for an IRQ.
+diff --git a/hypervisor/tests/kvm/aarch64.rs b/hypervisor/tests/kvm/aarch64.rs
+index d9d593848..6ddcd4505 100644
+--- a/hypervisor/tests/kvm/aarch64.rs
++++ b/hypervisor/tests/kvm/aarch64.rs
+@@ -30,6 +30,7 @@ fn set_gsi_routing() {
+         source: IrqSource::Msi {
+             address: 0xf000000,
+             data: 0xa0,
++            pci_addr: 0,
+         },
+     }])
+     .unwrap();
+@@ -46,6 +47,7 @@ fn set_gsi_routing() {
+             source: IrqSource::Msi {
+                 address: 0xf000000,
+                 data: 0xa0,
++                pci_addr: 0,
+             },
+         },
+     ])
+diff --git a/src/crosvm/sys/linux.rs b/src/crosvm/sys/linux.rs
+index 2ff2cca48..fd9a57644 100644
+--- a/src/crosvm/sys/linux.rs
++++ b/src/crosvm/sys/linux.rs
+@@ -1033,6 +1033,7 @@ fn create_file_backed_mappings(
+             .custom_flags(if mapping.sync { libc::O_SYNC } else { 0 })
+             .open(&mapping.path)
+             .context("failed to open file for file-backed mapping")?;
++        println!("{:?}", mapping.path);
+         let prot = if mapping.writable {
+             Protection::read_write()
+         } else {
+@@ -1215,6 +1216,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
+     } else {
+         Some(64 * 1024 * 1024)
+     };
++    println!("=== {:?} ===", swiotlb);
+ 
+     let (pflash_image, pflash_block_size) = if let Some(pflash_parameters) = &cfg.pflash_parameters
+     {
+@@ -2008,7 +2010,7 @@ where
+         .filter_map(|d| (d.0).as_pci_device())
+         .collect();
+ 
+-    let virtio_devices: Vec<(&dyn VirtioDevice, devices::PciAddress)> = pci_devices
++    let mut virtio_devices: Vec<(&dyn VirtioDevice, devices::PciAddress)> = pci_devices
+         .into_iter()
+         .flat_map(|s| {
+             if let Some(virtio_pci_device) = s.as_virtio_pci_device() {
+diff --git a/vm_control/src/lib.rs b/vm_control/src/lib.rs
+index b3473efa3..f44cbe932 100644
+--- a/vm_control/src/lib.rs
++++ b/vm_control/src/lib.rs
+@@ -953,6 +953,7 @@ pub enum VmIrqRequest {
+         gsi: u32,
+         msi_address: u64,
+         msi_data: u32,
++        pci_addr: u32,
+     },
+     // unregister_irqfs() and release gsi
+     ReleaseOneIrq {
+@@ -1028,12 +1029,14 @@ impl VmIrqRequest {
+                 gsi,
+                 msi_address,
+                 msi_data,
++                pci_addr,
+             } => {
+                 let route = IrqRoute {
+                     gsi,
+                     source: IrqSource::Msi {
+                         address: msi_address,
+                         data: msi_data,
++                        pci_addr,
+                     },
+                 };
+                 match set_up_irq(IrqSetup::Route(route)) {
+
+base-commit: 65dc957d727bfe51abf99a47214b642fbab929c3
+-- 
+2.47.3
+

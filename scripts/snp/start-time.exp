@@ -1,0 +1,48 @@
+#!/usr/bin/expect -f
+
+# Set unlimited timeout for long boot times
+set timeout -1
+set fd [open "start-up-time.txt" w]
+
+# Record the start time
+set start_time [clock microseconds]
+set vfio_total_time 0
+set vfio_start_time 0
+
+# Launch the VM using your script (adjust the path if needed)
+# spawn ./run-passthrough.sh
+# spawn ./run-snp-possthrough.sh
+# spawn ./run-snp-virtio.sh
+spawn ./run-virtio.sh
+
+expect {
+    "vfio-dma-start" {
+        if { $vfio_start_time == 0 } {
+            set vfio_start_time [clock microseconds]
+        }
+        exp_continue
+    }
+    "vfio-dma-end" {
+        set vfio_end_time [clock microseconds]
+        set vfio_total_time [expr {$vfio_total_time + $vfio_end_time - $vfio_start_time}]
+        set vfio_start_time 0
+        exp_continue
+    }
+    # the first output after VM boots
+    "SecCoreStartupWithStack" {
+        set end_time [clock microseconds]
+        set boot_time [expr {$end_time - $start_time}]
+        puts "VFIO start-up time: $vfio_total_time microseconds"
+        puts "VM boot time: $boot_time microseconds"
+        puts $fd "VFIO start-up time: $vfio_total_time microseconds"
+        puts $fd "VM boot time: $boot_time microseconds"
+    }
+    "iPXE" {
+        set end_time [clock microseconds]
+        set boot_time [expr {$end_time - $start_time}]
+        puts "VFIO start-up time: $vfio_total_time microseconds"
+        puts "VM boot time: $boot_time microseconds"
+        puts $fd "VFIO start-up time: $vfio_total_time microseconds"
+        puts $fd "VM boot time: $boot_time microseconds"
+    }
+}
