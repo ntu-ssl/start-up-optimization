@@ -1,8 +1,8 @@
 Instructions for building the evaluation environment and executing the evaluation scripts are provided in this document.
 The artifacts intends to demonstrate the improvement of the start-up time of CVMs with device passthrough. Other setting (e.g., VM with device passthrough, CVM/VM using virtio) is not included in this documentation.
 
-We provide access to an R7515 server to reproduce the results of SEV-SNP. Reviewers can connect to our server and execute the evaluations.
-To request access, please contact us.
+We provide access to our R7515 server to reproduce the results of SEV-SNP. Reviewers can connect to our server using `ssh` and execute the evaluations.
+To request access, please contact us and provide your ssh public key. We will then be granted access to the user `reviewer` on our server.
 
 The kernel config and evaluation scripts are available in `/home/reviewer/start-up-optimization`.
 The host and guest kernel source code are located in `/home/reviewer/kernels`.
