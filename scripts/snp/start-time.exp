@@ -11,9 +11,9 @@ set vfio_start_time 0
 
 # Launch the VM using your script (adjust the path if needed)
 # spawn ./run-passthrough.sh
-# spawn ./run-snp-possthrough.sh
+spawn ./run-snp-passthrough.sh
 # spawn ./run-snp-virtio.sh
-spawn ./run-virtio.sh
+# spawn ./run-virtio.sh
 
 expect {
     "vfio-dma-start" {

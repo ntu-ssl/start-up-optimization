@@ -3,14 +3,13 @@ CMDLINE=""
 CMDLINE="swiotlb=force"
 CONSOLE="9889"
 UEFI_BIOS="/tmp2/b08902062/AMDSEV/snp-release-2025-05-29/usr/local/share/qemu/OVMF.fd"
-KERNEL="Image"
+KERNEL="snp-guest-opt"
 IMAGE="/tmp2/b08902062/vm/cloud.img"
-# QEMU="/tmp2/b08902062/AMDSEV/snp-release-2025-05-29/usr/local/bin/qemu-system-x86_64"
-# QEMU="/tmp2/b08902062/AMDSEV/qemu/build/qemu-system-x86_64"
-QEMU="/tmp2/b08902062/AMDSEV/qemu-opt/build/qemu-system-x86_64"
+QEMU="/home/reviewer/qemu-orig/build/qemu-system-x86_64"
+# QEMU="/home/reviewer/qemu-opt/build/qemu-system-x86_64"
 TRACE=""
 QMP="9899"
-MEM="$((8192))"
+MEM="$((8192*8))"
 SMP="8"
 RESUME=""
 NET=""
@@ -109,7 +108,6 @@ done
 echo "Mapping CTRL-C to CTRL-]"
 stty intr ^]
 
-/tmp2/b08902062/AMDSEV/linux/host/tools/perf/perf record -g -e cpu-cycles \
 sudo $QEMU \
     -kernel $KERNEL \
     -nographic \

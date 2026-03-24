@@ -106,7 +106,6 @@ done
 echo "Mapping CTRL-C to CTRL-]"
 stty intr ^]
 
-/tmp2/b08902062/AMDSEV/linux/host/tools/perf/perf record -g -e cpu-cycles \
 sudo $QEMU \
     -kernel $KERNEL \
     -nographic \

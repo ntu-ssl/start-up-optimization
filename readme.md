@@ -1,5 +1,8 @@
 This repo contains the scripts, the configs, and the patches related to start-up optimization.
 
+- `artifact-evaluation.md`
+The detailed documentation for artifact evaluation.
+
 - `patches/`
     The base commit is contained in all patches. Simply apply them to QEMU/crosvm/Linux kernel.
     - crosvm
