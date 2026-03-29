@@ -59,7 +59,7 @@ The software environment is ready. There is no need to build any software. The f
 ### Check List
 - The host kernel should be `6.11.0-rc3-snp-host-85ef1ac03941+`.
 ### Evaluation with Scripts
-1. Change to the directory `scripts/snp` and run `sudo bash enable-passthrough.sh`.
+1. Change to the directory `scripts/snp` and run `sudo bash set-host-env.sh`.
 2. By executing `sudo ./start-time.exp`, the user can launch a CVM with device passthrough and observe the start-up time.
 
 In `start-time.exp`, ensure the VM is spawned with `spawn ./run-snp-passthrough.sh` rather than other scripts.
