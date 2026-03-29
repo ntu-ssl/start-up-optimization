@@ -2,9 +2,9 @@ Instructions for building the evaluation environment and executing the evaluatio
 The artifacts intends to demonstrate the improvement of the start-up time of CVMs with device passthrough. Other setting (e.g., VM with device passthrough, CVM/VM using virtio) is not included in this documentation.
 
 We provide access to our R7515 server to reproduce the results of SEV-SNP. Reviewers can connect to our server using `ssh` and execute the evaluations.
-To request access, please contact us and provide your ssh public key. We will then be granted access to the user `reviewer` on our server.
+To request access, please contact us and provide your ssh public key. You will then be granted access to the user `reviewer` on our server.
 
-The kernel config and evaluation scripts are available in `/home/reviewer/start-up-optimization`.
+The kernel configs and evaluation scripts are available in `/home/reviewer/start-up-optimization`.
 The host and guest kernel source code are located in `/home/reviewer/kernels`.
 The QEMU source code is located in `/home/reviewer/qemu`.
 All other necessary software utilities, including kernel binaries, the QEMU executable, and the VM disk image are prepared on the server.
@@ -69,7 +69,7 @@ Modify `./run-snp-passthrough.sh`, ensure that `QEMU` points to `/home/reviewer/
 Modify `./run-snp-passthrough.sh`, ensure that `QEMU` points to `/home/reviewer/qemu-opt/build/qemu-system-x86_64`.
 ### Expected Results
 The reviewer should observe that the VM with start-up optimization boots faster than the baseline VM.
-The expect script will show similar output:
+The `expect` script will show similar output:
 ```
 VFIO start-up time: 6636255 microseconds
 VM boot time: 11343291 microseconds
